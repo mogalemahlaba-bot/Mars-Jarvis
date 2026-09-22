@@ -700,16 +700,34 @@ function initGis(){
     client_id:CLIENT_ID,
     scope:'https://www.googleapis.com/auth/drive.file',
     callback:async (resp)=>{
-      if(resp.error){ alert('Sign-in failed: '+resp.error); return; }
+      if(resp.error){
+        // Silent attempt failed (no active Google session / consent expired) — needs a manual tap.
+        if(silentAttemptInProgress){
+          silentAttemptInProgress=false;
+          document.getElementById('driveDetail').textContent='Session expired — tap "Sign in with Google" to reconnect.';
+          return;
+        }
+        alert('Sign-in failed: '+resp.error); return;
+      }
+      silentAttemptInProgress=false;
       accessToken=resp.access_token;
       gapi.client.setToken({access_token:accessToken});
       document.getElementById('driveDetail').textContent='Connected. Locating jarvis-data.json…';
       document.getElementById('driveStatus').textContent='Drive: connected';
+      localStorage.setItem('mj_drive_authorized','1');
       await findOrCreateDataFile();
       await loadMemory();
     }
   });
   gisReady=true;
+}
+let silentAttemptInProgress=false;
+function attemptSilentReauth(){
+  if(!tokenClient) return;
+  silentAttemptInProgress=true;
+  // prompt:'' asks Google to reissue a token without showing UI if the browser still
+  // has an active Google session and the user already granted this app access.
+  tokenClient.requestAccessToken({prompt:''});
 }
 document.getElementById('signInBtn').onclick=()=>{
   if(!CLIENT_ID){ alert('Enter and save your Google OAuth Client ID first.'); return; }
@@ -720,6 +738,7 @@ document.getElementById('signInBtn').onclick=()=>{
 document.getElementById('signOutBtn').onclick=()=>{
   if(accessToken){ google.accounts.oauth2.revoke(accessToken,()=>{}); }
   accessToken=null; driveFileId=null;
+  localStorage.removeItem('mj_drive_authorized');
   document.getElementById('driveStatus').textContent='Drive: not connected';
   document.getElementById('driveDetail').textContent='Not connected.';
 };
@@ -802,7 +821,16 @@ document.getElementById('exportBtn').onclick=()=>{
   applySettingsToUI();
   renderAll();
   initSpeech();
-  if(CLIENT_ID) setTimeout(initGis,600);
+  if(CLIENT_ID){
+    setTimeout(()=>{
+      initGis();
+      // If you've signed in successfully before, try to reconnect quietly on launch.
+      if(localStorage.getItem('mj_drive_authorized')==='1'){
+        document.getElementById('driveDetail').textContent='Reconnecting to Drive…';
+        setTimeout(attemptSilentReauth,400);
+      }
+    },600);
+  }
   logConsole('jarvis','Mars Jarvis Phase 1 online. Connect Google Drive in Settings to persist memory.');
 })();
 
