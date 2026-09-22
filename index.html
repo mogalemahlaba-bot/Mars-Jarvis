@@ -11,6 +11,9 @@
 <link rel="manifest" href="manifest.json">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon.svg">
+<link rel="preconnect" href="https://accounts.google.com">
+<link rel="preconnect" href="https://apis.google.com">
+<link rel="preconnect" href="https://www.googleapis.com">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://apis.google.com/js/api.js"></script>
 <style>
@@ -608,11 +611,19 @@ function logConsole(who,text){
 document.getElementById('clearConsoleBtn').onclick=()=>document.getElementById('consoleLog').innerHTML='';
 
 /* ---------- Command parsing ---------- */
+let lastUtterance='', lastUtteranceAt=0;
 function handleUtterance(raw){
   document.getElementById('liveTranscript').textContent='';
   const lower=raw.toLowerCase().trim();
   const wake=(STATE.settings.wakeWord||'jarvis').toLowerCase();
   if(!lower.includes(wake)) return; // ignore anything without wake word
+
+  // Android's recognizer sometimes re-fires the exact same final transcript
+  // within the same listening session — ignore an identical repeat within 2.5s.
+  const now=Date.now();
+  if(lower===lastUtterance && (now-lastUtteranceAt)<2500) return;
+  lastUtterance=lower; lastUtteranceAt=now;
+
   logConsole('user',raw);
 
   // strip wake word and leading filler
@@ -822,14 +833,22 @@ document.getElementById('exportBtn').onclick=()=>{
   renderAll();
   initSpeech();
   if(CLIENT_ID){
-    setTimeout(()=>{
-      initGis();
-      // If you've signed in successfully before, try to reconnect quietly on launch.
-      if(localStorage.getItem('mj_drive_authorized')==='1'){
-        document.getElementById('driveDetail').textContent='Reconnecting to Drive…';
-        setTimeout(attemptSilentReauth,400);
+    // Poll for Google's script instead of blindly waiting a fixed amount of time —
+    // starts the reconnect the instant it's actually ready, not after an arbitrary delay.
+    const wantsAutoReconnect = localStorage.getItem('mj_drive_authorized')==='1';
+    if(wantsAutoReconnect) document.getElementById('driveDetail').textContent='Reconnecting to Drive…';
+    let attempts=0;
+    const waitForGoogle=setInterval(()=>{
+      attempts++;
+      if(window.google && window.google.accounts){
+        clearInterval(waitForGoogle);
+        initGis();
+        if(wantsAutoReconnect) attemptSilentReauth();
+      } else if(attempts>60){ // ~15s safety cap, e.g. no network at all
+        clearInterval(waitForGoogle);
+        if(wantsAutoReconnect) document.getElementById('driveDetail').textContent='Could not reach Google — check your connection, then tap Sign in.';
       }
-    },600);
+    },250);
   }
   logConsole('jarvis','Mars Jarvis Phase 1 online. Connect Google Drive in Settings to persist memory.');
 })();
