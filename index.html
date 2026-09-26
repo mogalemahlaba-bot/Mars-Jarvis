@@ -306,6 +306,27 @@ a.inline{color:var(--cyan);}
     </section>
 
     <!-- VOICE CONSOLE -->
+    <!-- CONTACTS -->
+    <section class="section" id="sec-contacts">
+      <div class="hud-header"><div><div class="hud-title">CONTACTS</div><div class="hud-sub">Jarvis's own address book — separate from your phone's real contacts.</div></div></div>
+      <div class="panel" style="margin-bottom:18px;">
+        <div class="panel-body">
+          <div class="field"><label>Name</label><input type="text" id="contactName" placeholder="Full name"></div>
+          <div class="field"><label>Phone</label><input type="text" id="contactPhone" placeholder="e.g. 082 123 4567"></div>
+          <div class="field"><label>Email</label><input type="text" id="contactEmail" placeholder="name@example.com"></div>
+          <div class="btn-row" style="justify-content:flex-start;">
+            <button class="btn primary" id="addContactBtn">+ Add Contact</button>
+            <button class="btn" id="importContactBtn">📱 Import from Phone</button>
+          </div>
+          <div class="hint" id="importHint" style="margin-top:10px;"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h3>ALL CONTACTS</h3><input type="text" id="contactSearch" placeholder="Search contacts..." style="width:200px;"></div>
+        <div class="panel-body"><div class="list" id="contactsList"></div></div>
+      </div>
+    </section>
+
     <section class="section" id="sec-voice">
       <div class="hud-header"><div><div class="hud-title">VOICE CONSOLE</div><div class="hud-sub">Wake word: <b style="color:var(--cyan)">"Jarvis"</b></div></div></div>
       <div class="badge-row">
@@ -319,6 +340,10 @@ a.inline{color:var(--cyan);}
           <div class="panel-body">
             <div class="console" id="consoleLog"></div>
             <div class="transcript-live" id="liveTranscript"></div>
+            <div class="field" style="margin-top:12px;display:flex;gap:8px;">
+              <input type="text" id="typedCommandInput" placeholder='Type a command, e.g. "jarvis what is the capital of Japan"' style="flex:1;">
+              <button class="btn primary" id="typedCommandBtn" style="flex:none;">Send</button>
+            </div>
           </div>
         </div>
         <div class="panel">
@@ -333,7 +358,7 @@ a.inline{color:var(--cyan);}
               <button class="btn primary" id="pushTalkBtn">🎤 Push to Talk</button>
               <button class="btn icon-toggle" id="muteBtn">🔊 Mute</button>
             </div>
-            <div class="hint">Try: "Jarvis, save note ..." · "Jarvis, show notes" · "Jarvis, add task ..." · "Jarvis, complete task ..." · "Jarvis, what time is it"</div>
+            <div class="hint">Try: "Jarvis, save note ..." · "Jarvis, show notes" · "Jarvis, add task ..." · "Jarvis, complete task ..." · "Jarvis, add contact ..." · "Jarvis, what time is it"</div>
           </div>
         </div>
       </div>
@@ -372,6 +397,29 @@ a.inline{color:var(--cyan);}
           </div>
         </div>
       </div>
+      <div class="settings-grid" style="margin-top:18px;">
+        <div class="panel">
+          <div class="panel-head"><h3>AI CAPABILITIES</h3></div>
+          <div class="panel-body">
+            <div class="field">
+              <label>Anthropic API Key</label>
+              <input type="password" id="aiKeyInput" placeholder="sk-ant-...">
+              <div class="hint">Get a free key at <a class="inline" href="https://console.anthropic.com/" target="_blank">console.anthropic.com</a>. Since Jarvis has no backend, this key is stored only in this browser's local storage on this device — it is <b>not</b> synced to Drive or shared anywhere. Set a low spending limit on the key as a safety net, and don't share this app's link publicly while a key is set.</div>
+            </div>
+            <div class="btn-row" style="justify-content:flex-start;">
+              <button class="btn primary" id="saveAiKeyBtn">Save Key</button>
+              <button class="btn danger" id="clearAiKeyBtn">Clear Key</button>
+            </div>
+            <div class="hint" id="aiKeyStatus" style="margin-top:10px;"></div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>HOW IT'S USED</h3></div>
+          <div class="panel-body">
+            <div class="hint">When a voice or typed command doesn't match a built-in Notes/Tasks/Contacts command, Jarvis sends it to Claude (Haiku model) and speaks back the reply. Without a key set, Jarvis just says it doesn't have a command for that yet.</div>
+          </div>
+        </div>
+      </div>
     </section>
 
   </main>
@@ -388,6 +436,7 @@ const SECTIONS = [
   {id:'home', label:'Home', icon:'◈'},
   {id:'memory', label:'Memory', icon:'◆'},
   {id:'tasks', label:'Tasks', icon:'▣'},
+  {id:'contacts', label:'Contacts', icon:'☺'},
   {id:'voice', label:'Voice Console', icon:'◉'},
   {id:'settings', label:'Settings', icon:'⚙'},
 ];
@@ -395,6 +444,7 @@ const SECTIONS = [
 let STATE = {
   notes: [],
   tasks: [],
+  contacts: [],
   research: [],
   conversations: [],
   settings: { wakeWord:'jarvis', rate:1, muted:false }
@@ -443,7 +493,7 @@ setInterval(tickClock,1000); tickClock();
 
 /* ---------- Rendering ---------- */
 function renderAll(){
-  renderNotes(); renderTasks(); renderStats(); renderFeed();
+  renderNotes(); renderTasks(); renderContacts(); renderStats(); renderFeed();
 }
 function renderStats(){
   document.getElementById('statNotes').textContent=STATE.notes.length;
@@ -503,6 +553,73 @@ function editNote(id){
 function deleteNote(id){ STATE.notes=STATE.notes.filter(n=>n.id!==id); saveMemory(); renderAll(); }
 window.editNote=editNote; window.deleteNote=deleteNote;
 
+/* ---------- Contacts CRUD ---------- */
+function addContact(name,phone='',email=''){
+  if(!name||!name.trim())return null;
+  const c={id:uid(),name:name.trim(),phone:phone.trim(),email:email.trim(),created:Date.now()};
+  STATE.contacts.push(c); saveMemory(); renderAll(); return c;
+}
+function editContact(id){
+  const c=STATE.contacts.find(x=>x.id===id); if(!c)return;
+  const name=prompt('Name:',c.name); if(name===null)return;
+  const phone=prompt('Phone:',c.phone||''); if(phone===null)return;
+  const email=prompt('Email:',c.email||''); if(email===null)return;
+  c.name=name.trim(); c.phone=phone.trim(); c.email=email.trim();
+  saveMemory(); renderAll();
+}
+function deleteContact(id){ STATE.contacts=STATE.contacts.filter(c=>c.id!==id); saveMemory(); renderAll(); }
+window.editContact=editContact; window.deleteContact=deleteContact;
+
+function renderContacts(filter=''){
+  const list=document.getElementById('contactsList');
+  const f=filter.toLowerCase();
+  const items=STATE.contacts.filter(c=>
+    c.name.toLowerCase().includes(f) || (c.phone||'').includes(f) || (c.email||'').toLowerCase().includes(f)
+  ).slice().reverse();
+  if(!items.length){list.innerHTML='<div class="empty">No contacts yet.</div>';return;}
+  list.innerHTML=items.map(c=>`
+    <div class="item" data-id="${c.id}">
+      <div class="item-main">
+        <div class="item-title">${escapeHtml(c.name)}</div>
+        <div class="item-meta">${escapeHtml(c.phone||'')}${c.phone&&c.email?' · ':''}${escapeHtml(c.email||'')}</div>
+      </div>
+      <div class="item-actions">
+        <button class="icon-btn" onclick="editContact('${c.id}')">✎</button>
+        <button class="icon-btn" onclick="deleteContact('${c.id}')">🗑</button>
+      </div>
+    </div>`).join('');
+}
+
+document.getElementById('addContactBtn').onclick=()=>{
+  const n=document.getElementById('contactName'), p=document.getElementById('contactPhone'), em=document.getElementById('contactEmail');
+  if(addContact(n.value,p.value,em.value)){ n.value=''; p.value=''; em.value=''; }
+};
+document.getElementById('contactSearch').oninput=e=>renderContacts(e.target.value);
+
+document.getElementById('importContactBtn').onclick=async ()=>{
+  const hint=document.getElementById('importHint');
+  if(!('contacts' in navigator) || !('ContactsManager' in window)){
+    hint.textContent='Your browser doesn\'t support picking real contacts — Chrome for Android is required. You can still add contacts manually above.';
+    return;
+  }
+  try{
+    const props=['name','tel','email'];
+    const picked=await navigator.contacts.select(props,{multiple:true});
+    if(!picked.length){ hint.textContent='No contacts selected.'; return; }
+    picked.forEach(p=>{
+      addContact(
+        (p.name&&p.name[0])||'Unnamed',
+        (p.tel&&p.tel[0])||'',
+        (p.email&&p.email[0])||''
+      );
+    });
+    hint.textContent=`Imported ${picked.length} contact(s).`;
+  }catch(err){
+    hint.textContent='Import cancelled or blocked.';
+  }
+};
+
+
 document.getElementById('addNoteBtn').onclick=()=>{
   const ta=document.getElementById('noteInput');
   if(addNote(ta.value)) ta.value='';
@@ -549,7 +666,8 @@ function initSpeech(){
       if(e.results[i].isFinal) final+=t; else interim+=t;
     }
     document.getElementById('liveTranscript').textContent=interim;
-    if(final.trim()) handleUtterance(final.trim());
+    const cleaned=final.trim();
+    if(cleaned) handleUtterance(cleaned);
   };
   recognition.onerror=(e)=>{ console.warn('speech error',e.error); if(e.error==='not-allowed'){ setListeningUI(false); } };
   recognition.onend=()=>{
@@ -568,8 +686,10 @@ function setListeningUI(on){
   document.getElementById('statusText').textContent=on?'LISTENING':'OFFLINE';
   document.getElementById('statusTextM').textContent=on?'LISTENING':'OFFLINE';
 }
+const sessionSpokenPhrases=new Set();
 function startListening(){
   if(!recognition) return;
+  sessionSpokenPhrases.clear(); // a fresh, user-initiated session may repeat any phrase
   try{ recognition.start(); setListeningUI(true); }catch(e){ /* already started */ }
 }
 function stopListening(){
@@ -609,20 +729,31 @@ function logConsole(who,text){
   el.appendChild(line); el.scrollTop=el.scrollHeight;
 }
 document.getElementById('clearConsoleBtn').onclick=()=>document.getElementById('consoleLog').innerHTML='';
+document.getElementById('typedCommandBtn').onclick=()=>{
+  const inp=document.getElementById('typedCommandInput');
+  let text=inp.value.trim(); if(!text) return;
+  const wake=(STATE.settings.wakeWord||'jarvis');
+  if(!text.toLowerCase().includes(wake.toLowerCase())) text=wake+', '+text;
+  handleUtterance(text);
+  inp.value='';
+};
+document.getElementById('typedCommandInput').addEventListener('keydown',(e)=>{
+  if(e.key==='Enter') document.getElementById('typedCommandBtn').click();
+});
 
 /* ---------- Command parsing ---------- */
-let lastUtterance='', lastUtteranceAt=0;
 function handleUtterance(raw){
   document.getElementById('liveTranscript').textContent='';
   const lower=raw.toLowerCase().trim();
   const wake=(STATE.settings.wakeWord||'jarvis').toLowerCase();
   if(!lower.includes(wake)) return; // ignore anything without wake word
 
-  // Android's recognizer sometimes re-fires the exact same final transcript
-  // within the same listening session — ignore an identical repeat within 2.5s.
-  const now=Date.now();
-  if(lower===lastUtterance && (now-lastUtteranceAt)<2500) return;
-  lastUtterance=lower; lastUtteranceAt=now;
+  // Android's recognizer can re-fire the exact same finalized phrase across
+  // multiple internal restarts of a continuous session. Remembering every
+  // phrase already handled in this session (cleared only when the user
+  // explicitly starts a new one) stops it from repeating indefinitely.
+  if(sessionSpokenPhrases.has(lower)) return;
+  sessionSpokenPhrases.add(lower);
 
   logConsole('user',raw);
 
@@ -631,9 +762,54 @@ function handleUtterance(raw){
   cmd=cmd.replace(/^[,.\-\s]+/,'');
 
   let response = routeCommand(cmd);
+  if(response===null){
+    const apiKey=localStorage.getItem('mj_ai_key')||'';
+    if(!apiKey){
+      response="I heard you, but I don't have a command for that yet. Add a free Anthropic API key in Settings so I can answer anything.";
+      STATE.conversations.push({id:uid(),command:raw,response,created:Date.now()});
+      saveMemory(); renderAll(); speak(response);
+    } else {
+      speak('Let me think about that.');
+      askClaude(cmd, apiKey).then(aiText=>{
+        STATE.conversations.push({id:uid(),command:raw,response:aiText,created:Date.now()});
+        saveMemory(); renderAll(); speak(aiText);
+      }).catch(err=>{
+        const msg='Sorry, I could not reach the AI service. '+(err&&err.message?err.message:'');
+        STATE.conversations.push({id:uid(),command:raw,response:msg,created:Date.now()});
+        saveMemory(); renderAll(); speak(msg);
+      });
+    }
+    return;
+  }
   STATE.conversations.push({id:uid(),command:raw,response,created:Date.now()});
   saveMemory(); renderAll();
   speak(response);
+}
+
+/* ---------- AI fallback (bring-your-own Anthropic API key) ---------- */
+async function askClaude(prompt, apiKey){
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method:'POST',
+    headers:{
+      'Content-Type':'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version':'2023-06-01',
+      'anthropic-dangerous-direct-browser-access':'true'
+    },
+    body: JSON.stringify({
+      model:'claude-haiku-4-5-20251001',
+      max_tokens:300,
+      system:'You are Jarvis, a concise personal AI assistant spoken aloud through text-to-speech. Keep answers short and conversational — a sentence or two unless more detail is clearly needed.',
+      messages:[{role:'user', content: prompt}]
+    })
+  });
+  if(!res.ok){
+    const body=await res.text().catch(()=> '');
+    throw new Error('('+res.status+') '+body.slice(0,120));
+  }
+  const data = await res.json();
+  const text=(data.content||[]).map(b=>b.text||'').join(' ').trim();
+  return text || "I didn't get a usable answer that time.";
 }
 
 function routeCommand(cmd){
@@ -682,15 +858,29 @@ function routeCommand(cmd){
     if(!open.length) return 'You have no open tasks.';
     return `You have ${open.length} open tasks. Top priority: ${open.slice(-1)[0].text}`;
   }
+  // ADD CONTACT (name only via voice — phone/email are easier typed manually)
+  if(m=cmd.match(/^(add|new|save)\s+contact[:\s]+(.+)/)){
+    addContact(m[2]); return `Contact ${m[2]} saved. Add their number or email in the Contacts tab.`;
+  }
+  // SHOW / FIND CONTACT
+  if(m=cmd.match(/^(show|find)\s+contact[:\s]+(.+)/)){
+    const c=STATE.contacts.find(x=>x.name.toLowerCase().includes(m[2]));
+    if(!c) return `I couldn't find a contact matching ${m[2]}.`;
+    return `${c.name}${c.phone?', number '+c.phone:''}${c.email?', email '+c.email:''}.`;
+  }
+  if(/^(show|list)\s+contacts?/.test(cmd)){
+    if(!STATE.contacts.length) return 'You have no contacts saved.';
+    return `You have ${STATE.contacts.length} contacts saved.`;
+  }
   // TIME
   if(/what.*time/.test(cmd)) return `It is ${new Date().toLocaleTimeString()}.`;
   // GO TO SECTION
-  if(m=cmd.match(/^(go to|open|show)\s+(home|memory|tasks|voice console|settings)/)){
-    const map={'home':'home','memory':'memory','tasks':'tasks','voice console':'voice','settings':'settings'};
+  if(m=cmd.match(/^(go to|open|show)\s+(home|memory|tasks|contacts|voice console|settings)/)){
+    const map={'home':'home','memory':'memory','tasks':'tasks','contacts':'contacts','voice console':'voice','settings':'settings'};
     showSection(map[m[2]]); return `Opening ${m[2]}.`;
   }
   if(!cmd) return 'I am online and listening, sir.';
-  return "I heard you, but I don't have a command for that yet.";
+  return null; // signals: no local command matched — handleUtterance may hand this to the AI
 }
 
 /* ============================================================
@@ -823,10 +1013,24 @@ document.getElementById('exportBtn').onclick=()=>{
   const blob=new Blob([JSON.stringify(STATE,null,2)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='jarvis-data.json'; a.click();
 };
+document.getElementById('saveAiKeyBtn').onclick=()=>{
+  const val=document.getElementById('aiKeyInput').value.trim();
+  if(!val){ alert('Enter an API key first.'); return; }
+  localStorage.setItem('mj_ai_key',val);
+  document.getElementById('aiKeyStatus').textContent='Key saved on this device. Try a question Jarvis doesn\'t already have a command for.';
+  document.getElementById('aiKeyInput').value='';
+};
+document.getElementById('clearAiKeyBtn').onclick=()=>{
+  localStorage.removeItem('mj_ai_key');
+  document.getElementById('aiKeyStatus').textContent='Key cleared. AI fallback is now off.';
+};
 
 /* ---------- Boot ---------- */
 (function boot(){
   document.getElementById('clientIdInput').value=CLIENT_ID;
+  if(localStorage.getItem('mj_ai_key')){
+    document.getElementById('aiKeyStatus').textContent='An AI key is currently saved on this device.';
+  }
   const backup=localStorage.getItem('mj_state_backup');
   if(backup){ try{ STATE=Object.assign(STATE,JSON.parse(backup)); }catch(e){} }
   applySettingsToUI();
