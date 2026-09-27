@@ -1,0 +1,51 @@
+import os
+from google import genai
+from google.genai import types
+
+# 1. Initialize the client (Reads GEMINI_API_KEY from environment variables)
+client = genai.Client()
+
+# 2. Define the functions Jarvis can perform
+def get_current_weather(location: str) -> str:
+    """Gets the current weather for a specific city location."""
+    # In a real app, fetch from Open-Meteo here
+    return f"The weather in {location} is currently clear and 22°C."
+
+def toggle_smart_light(room: str, state: str) -> str:
+    """Turns a smart light on or off in a specific room."""
+    return f"Successfully turned the {room} light {state}."
+
+# 3. Group functions into an array of executable tools
+jarvis_tools = [get_current_weather, toggle_smart_light]
+
+def ask_jarvis(user_voice_prompt: str):
+    # Pass the tools directly to the model configuration
+    response = client.models.generate_content(
+        model='gemini-1.5-flash',
+        contents=user_voice_prompt,
+        config=types.GenerateContentConfig(
+            tools=jarvis_tools,
+            temperature=0.5
+        )
+    )
+
+    # 4. Handle Function Execution (If Gemini decides to call a function)
+    if response.function_calls:
+        for call in response.function_calls:
+            name = call.name
+            args = call.args
+            print(f"🤖 Jarvis Intent Detected: Calling local function '{name}' with arguments: {args}")
+            
+            # Map the response string string to the actual function execution
+            if name == "get_current_weather":
+                result = get_current_weather(location=args["location"])
+                print(f"Result: {result}")
+            elif name == "toggle_smart_light":
+                result = toggle_smart_light(room=args["room"], state=args["state"])
+                print(f"Result: {result}")
+    else:
+        # Standard chat response if no action was triggered
+        print(f"💬 Jarvis says: {response.text}")
+
+# Test Run Simulation
+ask_jarvis("Jarvis, check if it's raining in London and then turn off the bedroom lights.")
