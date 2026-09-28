@@ -1,4 +1,4 @@
-const CACHE = 'mars-jarvis-v8';
+const CACHE = 'mars-jarvis-v9';
 const SHELL = ['./', './index.html', './manifest.json', './icon.svg'];
 
 self.addEventListener('install', (e) => {

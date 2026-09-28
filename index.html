@@ -302,12 +302,12 @@ a.inline{color:var(--cyan);}
 
     <!-- TASKS -->
     <section class="section" id="sec-tasks">
-      <div class="hud-header"><div><div class="hud-title">TASK MATRIX</div><div class="hud-sub">Say "Jarvis, add task [text]" — set priority manually.</div></div></div>
+      <div class="hud-header"><div><div class="hud-title">TASK MATRIX</div><div class="hud-sub">Say "Jarvis, add task [text]" — priority is scored automatically if a Jev key is set, or say "high priority".</div></div></div>
       <div class="panel" style="margin-bottom:18px;">
         <div class="panel-body">
           <div class="field"><label>New Task</label><input type="text" id="taskInput" placeholder="Task description..."></div>
           <div class="field" style="max-width:200px;"><label>Priority</label>
-            <select id="taskPriority"><option value="low">Low</option><option value="med" selected>Medium</option><option value="high">High</option></select>
+            <select id="taskPriority"><option value="auto" selected>Auto (AI scores it)</option><option value="low">Low</option><option value="med">Medium</option><option value="high">High</option></select>
           </div>
           <div class="btn-row" style="justify-content:flex-start;"><button class="btn primary" id="addTaskBtn">+ Add Task</button></div>
         </div>
@@ -434,6 +434,30 @@ a.inline{color:var(--cyan);}
           </div>
         </div>
       </div>
+      <div class="settings-grid" style="margin-top:18px;">
+        <div class="panel">
+          <div class="panel-head"><h3>DECISION ENGINE (JEV)</h3></div>
+          <div class="panel-body">
+            <div class="field">
+              <label>MindsHub API Key</label>
+              <input type="password" id="jevKeyInput" placeholder="Your MindsHub key">
+              <div class="hint">Get a key at <a class="inline" href="https://console.mindshub.ai/" target="_blank">console.mindshub.ai</a>. Like the other keys, it is stored only in this browser on this device — never synced to Drive. When a key is set, the text of new tasks and notes is sent to MindsHub so Jev can score priority and pick a category.</div>
+            </div>
+            <div class="btn-row" style="justify-content:flex-start;">
+              <button class="btn primary" id="saveJevKeyBtn">Save Key</button>
+              <button class="btn" id="testJevBtn">Test</button>
+              <button class="btn danger" id="clearJevKeyBtn">Clear Key</button>
+            </div>
+            <div class="hint" id="jevKeyStatus" style="margin-top:10px;"></div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>WHAT JEV DOES</h3></div>
+          <div class="panel-body">
+            <div class="hint">Jev is a decision model: it picks from options you define instead of writing free text. Jarvis uses it to auto-set task priority (when the priority is left on "Auto" or you don't say one aloud) and to tag each new note as idea, reminder, research or personal. Without a key, tasks default to Medium and notes stay untagged. If a call fails, nothing is blocked — the task or note is saved as normal.</div>
+          </div>
+        </div>
+      </div>
     </section>
 
   </main>
@@ -527,7 +551,7 @@ function renderNotes(filter=''){
   if(!items.length){list.innerHTML='<div class="empty">No notes yet.</div>';return;}
   list.innerHTML=items.map(n=>`
     <div class="item" data-id="${n.id}">
-      <div class="item-main"><div class="item-title">${escapeHtml(n.text)}</div><div class="item-meta">${new Date(n.created).toLocaleString()}</div></div>
+      <div class="item-main"><div class="item-title">${escapeHtml(n.text)}</div><div class="item-meta">${n.category?`<span class="tag">${escapeHtml(n.category)}</span>`:''}${new Date(n.created).toLocaleString()}</div></div>
       <div class="item-actions">
         <button class="icon-btn" onclick="editNote('${n.id}')">✎</button>
         <button class="icon-btn" onclick="deleteNote('${n.id}')">🗑</button>
@@ -557,7 +581,9 @@ function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2
 function addNote(text){
   if(!text||!text.trim())return null;
   const n={id:uid(),text:text.trim(),created:Date.now()};
-  STATE.notes.push(n); saveMemory(); renderAll(); return n;
+  STATE.notes.push(n); saveMemory(); renderAll();
+  autoCategorizeNote(n.id);
+  return n;
 }
 function editNote(id){
   const n=STATE.notes.find(x=>x.id===id); if(!n)return;
@@ -659,10 +685,13 @@ document.getElementById('addNoteBtn').onclick=()=>{
 document.getElementById('noteSearch').oninput=e=>renderNotes(e.target.value);
 
 /* ---------- Tasks CRUD ---------- */
-function addTask(text,priority='med'){
+function addTask(text,priority='auto'){
   if(!text||!text.trim())return null;
-  const t={id:uid(),text:text.trim(),priority,done:false,created:Date.now()};
-  STATE.tasks.push(t); saveMemory(); renderAll(); return t;
+  const auto=(!priority||priority==='auto');
+  const t={id:uid(),text:text.trim(),priority:auto?'med':priority,done:false,created:Date.now()};
+  STATE.tasks.push(t); saveMemory(); renderAll();
+  if(auto) autoPrioritizeTask(t.id);
+  return t;
 }
 function toggleTask(id){ const t=STATE.tasks.find(x=>x.id===id); if(t){t.done=!t.done; saveMemory(); renderAll();} }
 function deleteTask(id){ STATE.tasks=STATE.tasks.filter(t=>t.id!==id); saveMemory(); renderAll(); }
@@ -819,6 +848,85 @@ function handleUtterance(raw){
 }
 
 /* ---------- AI fallback (bring-your-own Anthropic API key) ---------- */
+/* ---------- Decision engine (Jev via MindsHub, bring-your-own key) ---------- */
+async function askJev(apiKey, state, questions){
+  const res=await fetch('https://api.mindshub.ai/v1/decisions',{
+    method:'POST',
+    headers:{'Authorization':'Bearer '+apiKey,'Content-Type':'application/json'},
+    body:JSON.stringify({model:'jev', state, questions})
+  });
+  if(!res.ok){
+    const body=await res.text().catch(()=> '');
+    throw new Error('('+res.status+') '+body.slice(0,150));
+  }
+  return res.json();
+}
+const NOTE_CATEGORY_QUESTION={
+  category:{
+    type:'choice',
+    instructions:'What kind of note is this?',
+    criteria:{
+      idea:'A creative idea, project concept or brainstorm.',
+      reminder:'Something to remember or do later.',
+      research:'A fact, reference or something learned.',
+      personal:'A personal thought, feeling or life note.'
+    }
+  }
+};
+const TASK_PRIORITY_QUESTION={
+  priority:{
+    type:'score',
+    instructions:'How urgent and important is this task?',
+    criteria:[
+      'Low: can wait, no real urgency.',
+      'Medium: should be done soon.',
+      'High: urgent or time-critical.'
+    ]
+  }
+};
+function autoPrioritizeTask(id){
+  const key=localStorage.getItem('mj_jev_key'); if(!key) return;
+  const t=STATE.tasks.find(x=>x.id===id); if(!t) return;
+  askJev(key,{task:t.text},TASK_PRIORITY_QUESTION).then(r=>{
+    const score=r.answers.priority.score;
+    const p=score>=1.5?'high':score>=0.5?'med':'low';
+    const cur=STATE.tasks.find(x=>x.id===id);
+    if(cur){ cur.priority=p; saveMemory(); renderAll(); }
+  }).catch(e=>console.warn('Jev priority failed',e));
+}
+function autoCategorizeNote(id){
+  const key=localStorage.getItem('mj_jev_key'); if(!key) return;
+  const n=STATE.notes.find(x=>x.id===id); if(!n) return;
+  askJev(key,{note:n.text},NOTE_CATEGORY_QUESTION).then(r=>{
+    const cur=STATE.notes.find(x=>x.id===id);
+    if(cur){ cur.category=r.answers.category.choice; saveMemory(); renderAll(); }
+  }).catch(e=>console.warn('Jev category failed',e));
+}
+document.getElementById('saveJevKeyBtn').onclick=()=>{
+  const v=document.getElementById('jevKeyInput').value.trim();
+  if(!v){ alert('Enter a MindsHub API key first.'); return; }
+  localStorage.setItem('mj_jev_key',v);
+  document.getElementById('jevKeyInput').value='';
+  document.getElementById('jevKeyStatus').textContent='Key saved on this device. Tap Test to check the connection.';
+};
+document.getElementById('clearJevKeyBtn').onclick=()=>{
+  localStorage.removeItem('mj_jev_key');
+  document.getElementById('jevKeyStatus').textContent='Key cleared. Tasks default to Medium and notes stay untagged.';
+};
+document.getElementById('testJevBtn').onclick=async ()=>{
+  const el=document.getElementById('jevKeyStatus');
+  const key=localStorage.getItem('mj_jev_key');
+  if(!key){ el.textContent='Save a key first.'; return; }
+  el.textContent='Testing…';
+  try{
+    const r=await askJev(key,{note:'Buy milk on the way home'},NOTE_CATEGORY_QUESTION);
+    el.textContent='Connected — Jev classified a test note as "'+r.answers.category.choice+'".';
+  }catch(e){
+    const net=(e instanceof TypeError);
+    el.textContent='Test failed: '+(e.message||e)+(net?' — this usually means no connection, or the browser blocked the request to MindsHub (CORS). If it persists, Jev may not be callable directly from a web page.':'');
+  }
+};
+
 async function askClaude(prompt, apiKey){
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method:'POST',
@@ -898,10 +1006,10 @@ function routeCommand(cmd){
   }
   // ADD TASK
   if(m=cmd.match(/^(add|new|create)\s+task[:\s]+(.+)/)){
-    let text=m[2], priority='med';
+    let text=m[2], priority=null;
     const pm=text.match(/\b(high|medium|med|low)\s+priority\b/);
     if(pm){priority=pm[1].startsWith('high')?'high':pm[1].startsWith('low')?'low':'med'; text=text.replace(pm[0],'').trim();}
-    addTask(text,priority); return `Task added${priority!=='med'?' with '+priority+' priority':''}.`;
+    addTask(text,priority); return `Task added${priority?' with '+priority+' priority':''}.`;
   }
   // COMPLETE TASK
   if(m=cmd.match(/^complete\s+task[:\s]+(.+)/)){
@@ -1262,6 +1370,9 @@ document.getElementById('clearAiKeyBtn').onclick=()=>{
 /* ---------- Boot ---------- */
 (function boot(){
   document.getElementById('clientIdInput').value=CLIENT_ID;
+  if(localStorage.getItem('mj_jev_key')){
+    document.getElementById('jevKeyStatus').textContent='A MindsHub key is currently saved on this device.';
+  }
   if(localStorage.getItem('mj_ai_key')){
     document.getElementById('aiKeyStatus').textContent='An AI key is currently saved on this device.';
   }
