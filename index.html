@@ -430,7 +430,8 @@ a.inline{color:var(--cyan);}
         <div class="panel">
           <div class="panel-head"><h3>HOW IT'S USED</h3></div>
           <div class="panel-body">
-            <div class="hint">When a voice or typed command doesn't match a built-in Notes/Tasks/Contacts command, Jarvis sends it to Claude (Haiku model) and speaks back the reply. Without a key set, Jarvis just says it doesn't have a command for that yet.</div>
+            <div class="hint">When a command doesn't match a built-in one, Jarvis sends it to Claude (Haiku). Claude can see your open tasks, recent notes and contact names, remembers the last few exchanges, and can act for you: add notes and tasks, complete tasks, save contacts, search notes or open a tab. That context is sent to Anthropic. Without a key, built-in commands and on-device learning still work.</div>
+            <div class="hint" id="learnStatus" style="margin-top:10px;"></div>
           </div>
         </div>
       </div>
@@ -534,6 +535,8 @@ function renderAll(){
   renderNotes(); renderTasks(); renderContacts(); renderStats(); renderFeed();
 }
 function renderStats(){
+  const lab=STATE.tasks.filter(t=>t.labeled).length, ls=document.getElementById('learnStatus');
+  if(ls) ls.textContent = lab>=6 ? `On-device learning: trained on ${lab} tasks you prioritised yourself. Tap a priority tag to correct Jarvis and it learns.` : `On-device learning: ${lab} of 6 tasks prioritised by you so far. After 6 (using at least two different levels), Jarvis starts predicting priority for new tasks.`;
   document.getElementById('statNotes').textContent=STATE.notes.length;
   document.getElementById('statTasks').textContent=STATE.tasks.filter(t=>!t.done).length;
   document.getElementById('statCmds').textContent=STATE.conversations.length;
@@ -566,7 +569,7 @@ function renderTasks(){
     <div class="item ${t.done?'done':''}" data-id="${t.id}">
       <div class="item-main">
         <div class="item-title">${escapeHtml(t.text)}</div>
-        <div class="item-meta"><span class="tag p-${t.priority}">${t.priority.toUpperCase()}</span>${new Date(t.created).toLocaleString()}</div>
+        <div class="item-meta"><span class="tag p-${t.priority}" style="cursor:pointer" title="${t.source==='jev'?'Scored by Jev — tap to correct':t.source==='learned'?'Predicted from your past choices — tap to correct':'Tap to change'}" onclick="cyclePriority('${t.id}')">${t.priority.toUpperCase()}</span>${new Date(t.created).toLocaleString()}</div>
       </div>
       <div class="item-actions">
         <button class="icon-btn" onclick="toggleTask('${t.id}')">${t.done?'↺':'✓'}</button>
@@ -689,6 +692,7 @@ function addTask(text,priority='auto'){
   if(!text||!text.trim())return null;
   const auto=(!priority||priority==='auto');
   const t={id:uid(),text:text.trim(),priority:auto?'med':priority,done:false,created:Date.now()};
+  if(!auto){ t.labeled=true; t.source='you'; }
   STATE.tasks.push(t); saveMemory(); renderAll();
   if(auto) autoPrioritizeTask(t.id);
   return t;
@@ -826,7 +830,7 @@ function handleUtterance(raw){
   if(response===null){
     const apiKey=localStorage.getItem('mj_ai_key')||'';
     if(!apiKey){
-      response="I heard you, but I don't have a command for that yet. Add a free Anthropic API key in Settings so I can answer anything.";
+      response="I heard you, but I don't have a command for that yet. Add an Anthropic API key in Settings so I can answer anything.";
       STATE.conversations.push({id:uid(),command:raw,response,created:Date.now()});
       saveMemory(); renderAll(); speak(response);
     } else {
@@ -884,15 +888,19 @@ const TASK_PRIORITY_QUESTION={
     ]
   }
 };
+function applyPriority(id,p,src){
+  const cur=STATE.tasks.find(x=>x.id===id);
+  if(cur && !cur.labeled){ cur.priority=p; cur.source=src; saveMemory(); renderAll(); }  // never overrides your own choice
+}
 function autoPrioritizeTask(id){
-  const key=localStorage.getItem('mj_jev_key'); if(!key) return;
   const t=STATE.tasks.find(x=>x.id===id); if(!t) return;
+  const local=()=>{ const p=learnedPriority(t.text); if(p) applyPriority(id,p,'learned'); };
+  const key=localStorage.getItem('mj_jev_key');
+  if(!key){ local(); return; }
   askJev(key,{task:t.text},TASK_PRIORITY_QUESTION).then(r=>{
     const score=r.answers.priority.score;
-    const p=score>=1.5?'high':score>=0.5?'med':'low';
-    const cur=STATE.tasks.find(x=>x.id===id);
-    if(cur){ cur.priority=p; saveMemory(); renderAll(); }
-  }).catch(e=>console.warn('Jev priority failed',e));
+    applyPriority(id,score>=1.5?'high':score>=0.5?'med':'low','jev');
+  }).catch(e=>{ console.warn('Jev priority failed',e); local(); });
 }
 function autoCategorizeNote(id){
   const key=localStorage.getItem('mj_jev_key'); if(!key) return;
@@ -927,29 +935,124 @@ document.getElementById('testJevBtn').onclick=async ()=>{
   }
 };
 
-async function askClaude(prompt, apiKey){
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method:'POST',
-    headers:{
-      'Content-Type':'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version':'2023-06-01',
-      'anthropic-dangerous-direct-browser-access':'true'
-    },
-    body: JSON.stringify({
-      model:'claude-haiku-4-5-20251001',
-      max_tokens:300,
-      system:'You are Jarvis, a concise personal AI assistant spoken aloud through text-to-speech. Keep answers short and conversational — a sentence or two unless more detail is clearly needed.',
-      messages:[{role:'user', content: prompt}]
-    })
+/* ---------- On-device learning (no server, no key, works offline) ---------- */
+const STOP=new Set('the and for you your with that this from have will would could should about into there their what when where which then than them they been were was are not but can get got all any our out too very just also its his her him she has had who how why now one two'.split(' '));
+function stem(w){ return w.length>4 ? w.replace(/(ing|ed|s)$/,'') : w; }
+function tokenize(t){ return (t||'').toLowerCase().split(/[^a-z0-9]+/).filter(w=>w.length>2&&!STOP.has(w)).map(stem); }
+
+// Naive Bayes trained only on tasks whose priority YOU chose or corrected.
+function trainPriorityModel(){
+  const cls=['low','med','high'];
+  const m={docs:{low:0,med:0,high:0},words:{low:{},med:{},high:{}},total:{low:0,med:0,high:0},vocab:new Set(),n:0};
+  STATE.tasks.filter(t=>t.labeled&&cls.includes(t.priority)).forEach(t=>{
+    m.docs[t.priority]++; m.n++;
+    tokenize(t.text).forEach(w=>{ m.words[t.priority][w]=(m.words[t.priority][w]||0)+1; m.total[t.priority]++; m.vocab.add(w); });
   });
-  if(!res.ok){
-    const body=await res.text().catch(()=> '');
-    throw new Error('('+res.status+') '+body.slice(0,120));
+  return m;
+}
+function learnedPriority(text){
+  const m=trainPriorityModel();
+  const cls=['low','med','high'];
+  if(m.n<6 || cls.filter(c=>m.docs[c]>0).length<2) return null;   // not enough of your own examples yet
+  const toks=tokenize(text);
+  if(!toks.some(w=>m.vocab.has(w))) return null;                   // nothing familiar in this task
+  const V=m.vocab.size||1, logp={};
+  cls.forEach(c=>{
+    let lp=Math.log((m.docs[c]+1)/(m.n+3));
+    toks.forEach(w=>{ lp+=Math.log(((m.words[c][w]||0)+1)/(m.total[c]+V)); });
+    logp[c]=lp;
+  });
+  const mx=Math.max(...Object.values(logp));
+  const ex={}; cls.forEach(c=>ex[c]=Math.exp(logp[c]-mx));
+  const sum=cls.reduce((a,c)=>a+ex[c],0);
+  let best=null,bp=0; cls.forEach(c=>{ const p=ex[c]/sum; if(p>bp){bp=p;best=c;} });
+  return bp>=0.5?best:null;
+}
+// TF-IDF + cosine similarity: ranks notes by relevance (word overlap, not deep semantics).
+function relatedNotes(query,limit=3){
+  const docs=STATE.notes.map(n=>({n,t:tokenize(n.text)}));
+  const q=tokenize(query);
+  if(!q.length||!docs.length) return [];
+  const df={}; docs.forEach(d=>new Set(d.t).forEach(w=>df[w]=(df[w]||0)+1));
+  const N=docs.length, idf=w=>Math.log((N+1)/((df[w]||0)+1))+1;
+  const vec=ts=>{ const v={}; ts.forEach(w=>v[w]=(v[w]||0)+1); for(const w in v) v[w]*=idf(w); return v; };
+  const qv=vec(q); const qn=Math.sqrt(Object.values(qv).reduce((a,x)=>a+x*x,0));
+  return docs.map(d=>{
+    const dv=vec(d.t); let dot=0,dn=0;
+    for(const w in dv) dn+=dv[w]*dv[w];
+    for(const w in qv) if(dv[w]) dot+=qv[w]*dv[w];
+    return {n:d.n,s:dot/((qn*Math.sqrt(dn))||1)};
+  }).filter(x=>x.s>0).sort((a,b)=>b.s-a.s).slice(0,limit);
+}
+function cyclePriority(id){
+  const t=STATE.tasks.find(x=>x.id===id); if(!t) return;
+  t.priority={low:'med',med:'high',high:'low'}[t.priority]||'med';
+  t.labeled=true; t.source='you';   // your correction becomes training data
+  saveMemory(); renderAll();
+}
+window.cyclePriority=cyclePriority;
+
+/* ---------- AI assistant: Claude with memory, context and tools ---------- */
+const AI_HISTORY=[];
+const AI_TOOLS=[
+  {name:'add_note',description:'Save a note for the user.',input_schema:{type:'object',properties:{text:{type:'string'}},required:['text']}},
+  {name:'add_task',description:'Add a task. Include priority ONLY if the user stated one; otherwise omit it.',input_schema:{type:'object',properties:{text:{type:'string'},priority:{type:'string',enum:['low','med','high']}},required:['text']}},
+  {name:'complete_task',description:'Mark an open task complete, matched by words in its text.',input_schema:{type:'object',properties:{text:{type:'string'}},required:['text']}},
+  {name:'add_contact',description:'Save a contact.',input_schema:{type:'object',properties:{name:{type:'string'},phone:{type:'string'},email:{type:'string'}},required:['name']}},
+  {name:'find_notes',description:'Find the notes most relevant to a topic.',input_schema:{type:'object',properties:{query:{type:'string'}},required:['query']}},
+  {name:'open_section',description:'Open a tab in the app.',input_schema:{type:'object',properties:{section:{type:'string',enum:['home','memory','tasks','contacts','voice','settings']}},required:['section']}}
+];
+function runTool(name,input){
+  try{
+    switch(name){
+      case 'add_note': addNote(input.text); return 'Note saved.';
+      case 'add_task': addTask(input.text,input.priority||'auto'); return 'Task added.';
+      case 'complete_task':{
+        const q=(input.text||'').toLowerCase();
+        const t=STATE.tasks.find(x=>!x.done&&x.text.toLowerCase().includes(q));
+        if(!t) return 'No matching open task.';
+        toggleTask(t.id); return 'Completed: '+t.text;
+      }
+      case 'add_contact': addContact(input.name,input.phone||'',input.email||''); return 'Contact saved.';
+      case 'find_notes':{ const r=relatedNotes(input.query,3); return r.length?r.map(x=>x.n.text).join(' | '):'No related notes.'; }
+      case 'open_section':
+        if(!SECTIONS.some(s=>s.id===input.section)) return 'Unknown section.';
+        showSection(input.section); return 'Opened '+input.section+'.';
+    }
+  }catch(e){ return 'Error: '+e.message; }
+  return 'Unknown tool.';
+}
+function aiContext(){
+  const open=STATE.tasks.filter(t=>!t.done).slice(-10).map(t=>'- '+t.text+' ['+t.priority+']').join('\n')||'(none)';
+  const notes=STATE.notes.slice(-8).map(n=>'- '+n.text.slice(0,120)).join('\n')||'(none)';
+  const names=STATE.contacts.slice(0,30).map(c=>c.name).join(', ')||'(none)';
+  return 'Now: '+new Date().toLocaleString()+'\nOpen tasks:\n'+open+'\nRecent notes:\n'+notes+'\nContacts: '+names;
+}
+async function askClaude(prompt, apiKey){
+  const system='You are Jarvis, a concise personal AI assistant whose replies are spoken aloud. Keep answers to a sentence or two unless more is clearly needed. You can act for the user with your tools (notes, tasks, contacts, opening tabs) — use them when the user asks you to do something, then confirm briefly. Never invent facts about the user beyond this context.\n\n'+aiContext();
+  const messages=[...AI_HISTORY.slice(-8),{role:'user',content:prompt}];
+  let finalText='';
+  for(let i=0;i<4;i++){
+    const res=await fetch('https://api.anthropic.com/v1/messages',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body:JSON.stringify({model:'claude-haiku-4-5-20251001',max_tokens:400,system,tools:AI_TOOLS,messages})
+    });
+    if(!res.ok){
+      const body=await res.text().catch(()=> '');
+      throw new Error('('+res.status+') '+body.slice(0,120));
+    }
+    const data=await res.json();
+    const text=(data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join(' ').trim();
+    if(text) finalText=text;
+    if(data.stop_reason!=='tool_use') break;
+    messages.push({role:'assistant',content:data.content});
+    messages.push({role:'user',content:data.content.filter(b=>b.type==='tool_use').map(b=>({type:'tool_result',tool_use_id:b.id,content:runTool(b.name,b.input)}))});
   }
-  const data = await res.json();
-  const text=(data.content||[]).map(b=>b.text||'').join(' ').trim();
-  return text || "I didn't get a usable answer that time.";
+  finalText=finalText||'Done.';
+  AI_HISTORY.push({role:'user',content:prompt},{role:'assistant',content:finalText});
+  while(AI_HISTORY.length>12) AI_HISTORY.shift();
+  return finalText;
 }
 
 // A command whose real answer requires an async Google API call: speak an
@@ -1003,6 +1106,12 @@ function routeCommand(cmd){
     const target=STATE.notes.find(n=>n.text.toLowerCase().includes(m[1]));
     if(target){deleteNote(target.id); return 'Note deleted.';}
     return "I couldn't find that note.";
+  }
+  // FIND RELATED NOTES (TF-IDF ranking)
+  if(m=cmd.match(/^(?:find|search)\s+notes?\s+(?:about|for|on)\s+(.+)/)){
+    const r=relatedNotes(m[1],3);
+    if(!r.length) return `I couldn't find notes related to ${m[1]}.`;
+    return `Closest ${r.length===1?'match':'matches'}: `+r.map(x=>x.n.text).join('. ')+'.';
   }
   // ADD TASK
   if(m=cmd.match(/^(add|new|create)\s+task[:\s]+(.+)/)){
