@@ -270,7 +270,20 @@ a.inline{color:var(--cyan);}
           </div>
         </div>
       </div>
+      <div class="grid" style="margin-top:18px;">
+        <div class="panel">
+          <div class="panel-head"><h3>UPCOMING EVENTS</h3><button class="btn ghost" id="refreshEventsBtn" style="padding:5px 10px;font-size:.72rem;">Refresh</button></div>
+          <div class="panel-body"><div class="feed" id="upcomingEvents"><div class="empty">Connect Google in Settings to see your calendar.</div></div></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>INBOX</h3><button class="btn ghost" id="refreshInboxBtn" style="padding:5px 10px;font-size:.72rem;">Refresh</button></div>
+          <div class="panel-body">
+            <div class="stat" style="text-align:center;padding:20px;"><b id="unreadCount">—</b><span>UNREAD EMAILS</span></div>
+          </div>
+        </div>
+      </div>
     </section>
+
 
     <!-- MEMORY -->
     <section class="section" id="sec-memory">
@@ -317,6 +330,7 @@ a.inline{color:var(--cyan);}
           <div class="btn-row" style="justify-content:flex-start;">
             <button class="btn primary" id="addContactBtn">+ Add Contact</button>
             <button class="btn" id="importContactBtn">📱 Import from Phone</button>
+            <button class="btn" id="syncGoogleContactsBtn">🔄 Sync Google Contacts</button>
           </div>
           <div class="hint" id="importHint" style="margin-top:10px;"></div>
         </div>
@@ -374,7 +388,7 @@ a.inline{color:var(--cyan);}
             <div class="field">
               <label>Google OAuth Client ID</label>
               <input type="text" id="clientIdInput" placeholder="xxxxxxxx.apps.googleusercontent.com">
-              <div class="hint">Create one free in <a class="inline" href="https://console.cloud.google.com/apis/credentials" target="_blank">Google Cloud Console</a> (OAuth Client ID → Web application), enable the <b>Google Drive API</b>, and add this page's URL as an authorized JavaScript origin. This is required because Jarvis has no backend — your data lives only in <code>jarvis-data.json</code> in your own Drive.</div>
+              <div class="hint">Create one free in <a class="inline" href="https://console.cloud.google.com/apis/credentials" target="_blank">Google Cloud Console</a> (OAuth Client ID → Web application), add this page's URL as an authorized JavaScript origin, and enable these APIs in the same project: <b>Drive API</b>, <b>Google Calendar API</b>, <b>Gmail API</b>, and <b>People API</b>. This is required because Jarvis has no backend — your data lives only in <code>jarvis-data.json</code> in your own Drive, and calendar/email/contacts are read live from your account each time.</div>
             </div>
             <div class="btn-row" style="justify-content:flex-start;">
               <button class="btn primary" id="saveClientIdBtn">Save Client ID</button>
@@ -618,6 +632,24 @@ document.getElementById('importContactBtn').onclick=async ()=>{
     hint.textContent='Import cancelled or blocked.';
   }
 };
+document.getElementById('syncGoogleContactsBtn').onclick=async ()=>{
+  const hint=document.getElementById('importHint');
+  if(!accessToken){ hint.textContent='Sign in to Google in Settings first.'; return; }
+  hint.textContent='Syncing…';
+  try{
+    const added=await syncGoogleContacts();
+    hint.textContent=`Synced — added ${added} new contact(s) from Google Contacts (existing ones by name were skipped).`;
+  }catch(err){
+    hint.textContent='Could not sync — you may need to sign out and back in to grant Contacts access.';
+  }
+};
+document.getElementById('refreshEventsBtn').onclick=()=>renderUpcomingEvents();
+document.getElementById('refreshInboxBtn').onclick=()=>{
+  const el=document.getElementById('unreadCount');
+  if(!accessToken){ el.textContent='—'; return; }
+  el.textContent='…';
+  getUnreadCount().then(n=>{ el.textContent=n; }).catch(()=>{ el.textContent='?'; });
+};
 
 
 document.getElementById('addNoteBtn').onclick=()=>{
@@ -812,6 +844,37 @@ async function askClaude(prompt, apiKey){
   return text || "I didn't get a usable answer that time.";
 }
 
+// A command whose real answer requires an async Google API call: speak an
+// immediate acknowledgment (the routeCommand return value), then once the
+// promise resolves, log + speak the actual result as a follow-up.
+function deferredReply(cmd, promiseFn){
+  promiseFn().then(text=>{
+    STATE.conversations.push({id:uid(),command:cmd,response:text,created:Date.now()});
+    saveMemory(); renderAll(); speak(text);
+  }).catch(err=>{
+    const msg="Sorry, that didn't work — "+(err&&err.message?err.message:'an error occurred')+'. You may need to re-authorize in Settings.';
+    STATE.conversations.push({id:uid(),command:cmd,response:msg,created:Date.now()});
+    saveMemory(); renderAll(); speak(msg);
+  });
+}
+// Basic natural-language time parsing for scheduling: handles "today"/"tomorrow"
+// plus a 12- or 24-hour clock time. Doesn't understand full dates — for
+// anything more specific, add the event directly in Google Calendar.
+function parseWhen(text){
+  const now=new Date();
+  const base=new Date(now);
+  if(/tomorrow/i.test(text)) base.setDate(base.getDate()+1);
+  const m=text.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+  if(m){
+    let hh=parseInt(m[1],10);
+    const mm=m[2]?parseInt(m[2],10):0;
+    const ap=m[3]?m[3].toLowerCase():null;
+    if(ap==='pm' && hh<12) hh+=12;
+    if(ap==='am' && hh===12) hh=0;
+    base.setHours(hh,mm,0,0);
+  }
+  return base;
+}
 function routeCommand(cmd){
   // SAVE NOTE
   let m;
@@ -872,8 +935,92 @@ function routeCommand(cmd){
     if(!STATE.contacts.length) return 'You have no contacts saved.';
     return `You have ${STATE.contacts.length} contacts saved.`;
   }
+  // DELETE CONTACT
+  if(m=cmd.match(/^delete\s+contact[:\s]+(.+)/)){
+    const c=STATE.contacts.find(x=>x.name.toLowerCase().includes(m[1]));
+    if(c){ deleteContact(c.id); return `Contact ${c.name} deleted.`; }
+    return "I couldn't find that contact.";
+  }
+  // CALL A SAVED CONTACT (hands off to your phone's dialer)
+  if(m=cmd.match(/^call\s+(.+)/)){
+    const c=STATE.contacts.find(x=>x.name.toLowerCase().includes(m[1]));
+    if(!c) return `I couldn't find a contact matching ${m[1]}.`;
+    if(!c.phone) return `I don't have a phone number saved for ${c.name}.`;
+    setTimeout(()=>{ window.location.href='tel:'+encodeURIComponent(c.phone); }, 400);
+    return `Calling ${c.name}.`;
+  }
+  // TEXT / MESSAGE A SAVED CONTACT (hands off to your messaging app)
+  if(m=cmd.match(/^(?:text|message)\s+(.+?)(?:\s+saying\s+(.+))?$/)){
+    const name=m[1], body=m[2]||'';
+    const c=STATE.contacts.find(x=>x.name.toLowerCase().includes(name));
+    if(!c) return `I couldn't find a contact matching ${name}.`;
+    if(!c.phone) return `I don't have a phone number saved for ${c.name}.`;
+    const smsUri='sms:'+encodeURIComponent(c.phone)+(body?'?body='+encodeURIComponent(body):'');
+    setTimeout(()=>{ window.location.href=smsUri; }, 400);
+    return `Opening a message to ${c.name}${body?': '+body:''}.`;
+  }
+  // NAVIGATE / DIRECTIONS (hands off to Google Maps)
+  if(m=cmd.match(/^(?:navigate to|directions to|take me to)\s+(.+)/)){
+    const dest=m[1];
+    setTimeout(()=>{ window.location.href='https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(dest); }, 400);
+    return `Opening directions to ${dest}.`;
+  }
   // TIME
   if(/what.*time/.test(cmd)) return `It is ${new Date().toLocaleTimeString()}.`;
+  // CALENDAR — check schedule
+  if(/^(what'?s on my calendar|show my (schedule|calendar)|check (my )?calendar)/.test(cmd)){
+    if(!accessToken) return "You'll need to connect Google in Settings first.";
+    deferredReply(cmd, async ()=>{
+      const events=await listUpcomingEvents(3);
+      if(!events.length) return 'Your calendar is clear for now.';
+      return 'Coming up: '+events.map(e=>`${e.title} at ${e.start?new Date(e.start).toLocaleString():'an unspecified time'}`).join('; ')+'.';
+    });
+    return 'Checking your calendar.';
+  }
+  // CALENDAR — schedule an event (basic time parsing: "today/tomorrow at 3pm / 15:00")
+  if(m=cmd.match(/^schedule\s+(.+?)\s+(?:at|for)\s+(.+)/)){
+    if(!accessToken) return "You'll need to connect Google in Settings first.";
+    const title=m[1], whenText=m[2];
+    const when=parseWhen(whenText);
+    deferredReply(cmd, async ()=>{
+      await createCalendarEvent(title, when);
+      renderUpcomingEvents();
+      return `Scheduled "${title}" for ${when.toLocaleString()}.`;
+    });
+    return `Scheduling ${title}.`;
+  }
+  // GMAIL — check unread
+  if(/^(check (my )?email|how many unread emails?|check inbox)/.test(cmd)){
+    if(!accessToken) return "You'll need to connect Google in Settings first.";
+    deferredReply(cmd, async ()=>{
+      const n=await getUnreadCount();
+      document.getElementById('unreadCount').textContent=n;
+      return n===0 ? 'Your inbox is clear.' : `You have ${n} unread email${n===1?'':'s'}.`;
+    });
+    return 'Checking your email.';
+  }
+  // GMAIL — send a quick email to a saved contact
+  if(m=cmd.match(/^email\s+(.+?)\s+saying\s+(.+)/)){
+    if(!accessToken) return "You'll need to connect Google in Settings first.";
+    const name=m[1], body=m[2];
+    const c=STATE.contacts.find(x=>x.name.toLowerCase().includes(name));
+    if(!c) return `I couldn't find a contact matching ${name}.`;
+    if(!c.email) return `I don't have an email saved for ${c.name}.`;
+    deferredReply(cmd, async ()=>{
+      await sendGmail(c.email, `Message from Jarvis`, body);
+      return `Email sent to ${c.name}.`;
+    });
+    return `Sending an email to ${c.name}.`;
+  }
+  // GOOGLE CONTACTS — sync
+  if(/^sync (my )?(google )?contacts/.test(cmd)){
+    if(!accessToken) return "You'll need to connect Google in Settings first.";
+    deferredReply(cmd, async ()=>{
+      const added=await syncGoogleContacts();
+      return `Synced your Google Contacts — added ${added} new contact${added===1?'':'s'}.`;
+    });
+    return 'Syncing your Google Contacts.';
+  }
   // GO TO SECTION
   if(m=cmd.match(/^(go to|open|show)\s+(home|memory|tasks|contacts|voice console|settings)/)){
     const map={'home':'home','memory':'memory','tasks':'tasks','contacts':'contacts','voice console':'voice','settings':'settings'};
@@ -899,7 +1046,13 @@ function initGis(){
   if(!window.google || !CLIENT_ID) return;
   tokenClient=google.accounts.oauth2.initTokenClient({
     client_id:CLIENT_ID,
-    scope:'https://www.googleapis.com/auth/drive.file',
+    scope:[
+      'https://www.googleapis.com/auth/drive.file',
+      'https://www.googleapis.com/auth/calendar.events',
+      'https://www.googleapis.com/auth/gmail.readonly',
+      'https://www.googleapis.com/auth/gmail.send',
+      'https://www.googleapis.com/auth/contacts.readonly'
+    ].join(' '),
     callback:async (resp)=>{
       if(resp.error){
         // Silent attempt failed (no active Google session / consent expired) — needs a manual tap.
@@ -918,6 +1071,8 @@ function initGis(){
       localStorage.setItem('mj_drive_authorized','1');
       await findOrCreateDataFile();
       await loadMemory();
+      renderUpcomingEvents();
+      document.getElementById('refreshInboxBtn').click();
     }
   });
   gisReady=true;
@@ -970,11 +1125,90 @@ async function loadMemory(){
   try{
     const res = await gapi.client.drive.files.get({fileId:driveFileId, alt:'media'});
     const data = typeof res.result==='object' ? res.result : JSON.parse(res.body);
-    STATE = Object.assign({notes:[],tasks:[],research:[],conversations:[],settings:{wakeWord:'jarvis',rate:1,muted:false}}, data);
+    STATE = Object.assign({notes:[],tasks:[],contacts:[],research:[],conversations:[],settings:{wakeWord:'jarvis',rate:1,muted:false}}, data);
     applySettingsToUI();
     renderAll();
     logConsole('jarvis','Memory loaded from Google Drive.');
   }catch(e){ console.warn('load failed',e); }
+}
+
+/* ---------- Google Calendar ---------- */
+async function listUpcomingEvents(maxResults=5){
+  const now=new Date().toISOString();
+  const res=await gapi.client.request({
+    path:'/calendar/v3/calendars/primary/events',
+    params:{timeMin:now, maxResults, singleEvents:true, orderBy:'startTime'}
+  });
+  return (res.result.items||[]).map(ev=>({
+    id:ev.id,
+    title:ev.summary||'(untitled)',
+    start:ev.start && (ev.start.dateTime||ev.start.date)
+  }));
+}
+async function createCalendarEvent(title, startDate){
+  const endDate=new Date(startDate.getTime()+60*60*1000); // default 1-hour event
+  const res=await gapi.client.request({
+    path:'/calendar/v3/calendars/primary/events',
+    method:'POST',
+    body:{
+      summary:title,
+      start:{dateTime:startDate.toISOString()},
+      end:{dateTime:endDate.toISOString()}
+    }
+  });
+  return res.result;
+}
+function renderUpcomingEvents(){
+  const el=document.getElementById('upcomingEvents');
+  if(!el) return;
+  if(!accessToken){ el.innerHTML='<div class="empty">Connect Google in Settings to see your calendar.</div>'; return; }
+  el.innerHTML='<div class="empty">Loading…</div>';
+  listUpcomingEvents(5).then(events=>{
+    if(!events.length){ el.innerHTML='<div class="empty">No upcoming events.</div>'; return; }
+    el.innerHTML=events.map(ev=>`<div class="feed-item"><b>${escapeHtml(ev.title)}</b><br>${ev.start?new Date(ev.start).toLocaleString():''}</div>`).join('');
+  }).catch(()=>{ el.innerHTML='<div class="empty">Could not load calendar (may need to re-authorize).</div>'; });
+}
+
+/* ---------- Gmail ---------- */
+async function getUnreadCount(){
+  const res=await gapi.client.request({
+    path:'/gmail/v1/users/me/messages',
+    params:{q:'is:unread in:inbox', maxResults:20}
+  });
+  return (res.result.resultSizeEstimate!=null)?res.result.resultSizeEstimate:((res.result.messages||[]).length);
+}
+function b64urlEncode(str){
+  return btoa(unescape(encodeURIComponent(str))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+async function sendGmail(to,subject,body){
+  const raw=b64urlEncode(`To: ${to}\r\nSubject: ${subject}\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n${body}`);
+  const res=await gapi.client.request({
+    path:'/gmail/v1/users/me/messages/send',
+    method:'POST',
+    body:{raw}
+  });
+  return res.result;
+}
+
+/* ---------- Google Contacts (People API) ---------- */
+async function syncGoogleContacts(){
+  const res=await gapi.client.request({
+    path:'/v1/people/me/connections',
+    root:'https://people.googleapis.com',
+    params:{personFields:'names,phoneNumbers,emailAddresses', pageSize:200}
+  });
+  const people=res.result.connections||[];
+  let added=0;
+  people.forEach(p=>{
+    const name=p.names && p.names[0] && p.names[0].displayName;
+    if(!name) return;
+    const phone=p.phoneNumbers && p.phoneNumbers[0] && p.phoneNumbers[0].value || '';
+    const email=p.emailAddresses && p.emailAddresses[0] && p.emailAddresses[0].value || '';
+    const exists=STATE.contacts.some(c=>c.name.toLowerCase()===name.toLowerCase());
+    if(!exists){ STATE.contacts.push({id:uid(),name,phone,email,created:Date.now()}); added++; }
+  });
+  saveMemory(); renderAll();
+  return added;
 }
 let saveTimer=null;
 function saveMemory(){
