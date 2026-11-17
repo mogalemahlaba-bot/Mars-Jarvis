@@ -341,6 +341,28 @@ a.inline{color:var(--cyan);}
       </div>
     </section>
 
+    <!-- ANALYTICS -->
+    <section class="section" id="sec-analytics">
+      <div class="hud-header"><div><div class="hud-title">ANALYTICS</div><div class="hud-sub">Plain-language analysis, no charts — numbers explained in words.</div></div></div>
+      <div class="panel" style="margin-bottom:18px;">
+        <div class="panel-head"><h3>ANALYZE YOUR DATA</h3></div>
+        <div class="panel-body">
+          <div class="field"><label>Paste numbers or CSV (with or without a header row)</label>
+            <textarea id="statsInput" placeholder="e.g. 12, 15, 9, 22, 18&#10;or paste a CSV with columns" style="min-height:100px;"></textarea>
+          </div>
+          <div class="btn-row" style="justify-content:flex-start;">
+            <button class="btn primary" id="analyzeDataBtn">Analyze</button>
+            <label class="btn" style="cursor:pointer;">Import CSV<input type="file" id="csvFileInput" accept=".csv,text/csv" style="display:none;"></label>
+          </div>
+          <div class="hint" id="statsOutput" style="margin-top:14px;white-space:pre-wrap;"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h3>JARVIS INSIGHTS</h3><button class="btn ghost" id="analyzeJarvisBtn" style="padding:5px 10px;font-size:.72rem;">Analyze My Data</button></div>
+        <div class="panel-body"><div class="hint" id="jarvisInsightsOutput" style="white-space:pre-wrap;">Tap "Analyze My Data" to get a plain-language summary of your tasks, notes and commands.</div></div>
+      </div>
+    </section>
+
     <section class="section" id="sec-voice">
       <div class="hud-header"><div><div class="hud-title">VOICE CONSOLE</div><div class="hud-sub">Wake word: <b style="color:var(--cyan)">"Jarvis"</b></div></div></div>
       <div class="badge-row">
@@ -459,6 +481,27 @@ a.inline{color:var(--cyan);}
           </div>
         </div>
       </div>
+      <div class="settings-grid" style="margin-top:18px;">
+        <div class="panel">
+          <div class="panel-head"><h3>BACKEND (OPTIONAL)</h3></div>
+          <div class="panel-body">
+            <div class="field"><label>Backend URL</label><input type="text" id="backendUrlInput" placeholder="https://jarvis-backend.yourname.workers.dev"></div>
+            <div class="field"><label>App token</label><input type="password" id="backendTokenInput" placeholder="The APP_TOKEN you set on the Worker"></div>
+            <div class="btn-row" style="justify-content:flex-start;">
+              <button class="btn primary" id="saveBackendBtn">Save</button>
+              <button class="btn" id="testBackendBtn">Test</button>
+              <button class="btn danger" id="clearBackendBtn">Clear</button>
+            </div>
+            <div class="hint" id="backendStatus" style="margin-top:10px;"></div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>WHAT THE BACKEND DOES</h3></div>
+          <div class="panel-body">
+            <div class="hint">A small free Cloudflare Worker that holds your Anthropic and MindsHub keys so they never sit in this browser, and that lets Jev work (browsers block direct calls to MindsHub). When it's set up, Jarvis uses it instead of any keys saved above. It stores nothing — your notes, tasks and contacts still live only in your Drive — but it does relay the text of AI requests to Anthropic and MindsHub.</div>
+          </div>
+        </div>
+      </div>
     </section>
 
   </main>
@@ -476,6 +519,7 @@ const SECTIONS = [
   {id:'memory', label:'Memory', icon:'◆'},
   {id:'tasks', label:'Tasks', icon:'▣'},
   {id:'contacts', label:'Contacts', icon:'☺'},
+  {id:'analytics', label:'Analytics', icon:'▤'},
   {id:'voice', label:'Voice Console', icon:'◉'},
   {id:'settings', label:'Settings', icon:'⚙'},
 ];
@@ -697,7 +741,10 @@ function addTask(text,priority='auto'){
   if(auto) autoPrioritizeTask(t.id);
   return t;
 }
-function toggleTask(id){ const t=STATE.tasks.find(x=>x.id===id); if(t){t.done=!t.done; saveMemory(); renderAll();} }
+function toggleTask(id){
+  const t=STATE.tasks.find(x=>x.id===id);
+  if(t){ t.done=!t.done; t.completedAt=t.done?Date.now():null; saveMemory(); renderAll(); }
+}
 function deleteTask(id){ STATE.tasks=STATE.tasks.filter(t=>t.id!==id); saveMemory(); renderAll(); }
 window.toggleTask=toggleTask; window.deleteTask=deleteTask;
 
@@ -794,6 +841,18 @@ function logConsole(who,text){
   el.appendChild(line); el.scrollTop=el.scrollHeight;
 }
 document.getElementById('clearConsoleBtn').onclick=()=>document.getElementById('consoleLog').innerHTML='';
+document.getElementById('analyzeDataBtn').onclick=()=>{
+  document.getElementById('statsOutput').textContent=analyzeDataset(document.getElementById('statsInput').value);
+};
+document.getElementById('csvFileInput').onchange=(e)=>{
+  const f=e.target.files[0]; if(!f) return;
+  const r=new FileReader();
+  r.onload=()=>{ document.getElementById('statsInput').value=r.result; document.getElementById('analyzeDataBtn').click(); };
+  r.readAsText(f);
+};
+document.getElementById('analyzeJarvisBtn').onclick=()=>{
+  document.getElementById('jarvisInsightsOutput').textContent=analyzeJarvisData();
+};
 document.getElementById('typedCommandBtn').onclick=()=>{
   const inp=document.getElementById('typedCommandInput');
   let text=inp.value.trim(); if(!text) return;
@@ -829,7 +888,7 @@ function handleUtterance(raw){
   let response = routeCommand(cmd);
   if(response===null){
     const apiKey=localStorage.getItem('mj_ai_key')||'';
-    if(!apiKey){
+    if(!apiKey && !backendCfg()){
       response="I heard you, but I don't have a command for that yet. Add an Anthropic API key in Settings so I can answer anything.";
       STATE.conversations.push({id:uid(),command:raw,response,created:Date.now()});
       saveMemory(); renderAll(); speak(response);
@@ -853,12 +912,24 @@ function handleUtterance(raw){
 
 /* ---------- AI fallback (bring-your-own Anthropic API key) ---------- */
 /* ---------- Decision engine (Jev via MindsHub, bring-your-own key) ---------- */
+/* ---------- Optional backend (Cloudflare Worker): keeps API keys off this device ---------- */
+function backendCfg(){
+  const url=(localStorage.getItem('mj_backend_url')||'').trim().replace(/\/+$/,'');
+  const token=(localStorage.getItem('mj_backend_token')||'').trim();
+  return (url&&token)?{url,token}:null;
+}
+function callClaudeAPI(apiKey, body){
+  const be=backendCfg();
+  if(be) return fetch(be.url+'/claude',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+be.token},body:JSON.stringify(body)});
+  return fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify(body)});
+}
+function callJevAPI(apiKey, payload){
+  const be=backendCfg();
+  if(be) return fetch(be.url+'/jev',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+be.token},body:JSON.stringify(payload)});
+  return fetch('https://api.mindshub.ai/v1/decisions',{method:'POST',headers:{'Authorization':'Bearer '+apiKey,'Content-Type':'application/json'},body:JSON.stringify(payload)});
+}
 async function askJev(apiKey, state, questions){
-  const res=await fetch('https://api.mindshub.ai/v1/decisions',{
-    method:'POST',
-    headers:{'Authorization':'Bearer '+apiKey,'Content-Type':'application/json'},
-    body:JSON.stringify({model:'jev', state, questions})
-  });
+  const res=await callJevAPI(apiKey,{model:'jev', state, questions});
   if(!res.ok){
     const body=await res.text().catch(()=> '');
     throw new Error('('+res.status+') '+body.slice(0,150));
@@ -895,21 +966,54 @@ function applyPriority(id,p,src){
 function autoPrioritizeTask(id){
   const t=STATE.tasks.find(x=>x.id===id); if(!t) return;
   const local=()=>{ const p=learnedPriority(t.text); if(p) applyPriority(id,p,'learned'); };
-  const key=localStorage.getItem('mj_jev_key');
-  if(!key){ local(); return; }
+  const key=localStorage.getItem('mj_jev_key')||'';
+  if(!key && !backendCfg()){ local(); return; }
   askJev(key,{task:t.text},TASK_PRIORITY_QUESTION).then(r=>{
     const score=r.answers.priority.score;
     applyPriority(id,score>=1.5?'high':score>=0.5?'med':'low','jev');
   }).catch(e=>{ console.warn('Jev priority failed',e); local(); });
 }
 function autoCategorizeNote(id){
-  const key=localStorage.getItem('mj_jev_key'); if(!key) return;
+  const key=localStorage.getItem('mj_jev_key')||''; if(!key && !backendCfg()) return;
   const n=STATE.notes.find(x=>x.id===id); if(!n) return;
   askJev(key,{note:n.text},NOTE_CATEGORY_QUESTION).then(r=>{
     const cur=STATE.notes.find(x=>x.id===id);
     if(cur){ cur.category=r.answers.category.choice; saveMemory(); renderAll(); }
   }).catch(e=>console.warn('Jev category failed',e));
 }
+document.getElementById('saveBackendBtn').onclick=()=>{
+  const u=document.getElementById('backendUrlInput').value.trim().replace(/\/+$/,'');
+  const t=document.getElementById('backendTokenInput').value.trim();
+  const el=document.getElementById('backendStatus');
+  if(!/^https:\/\/[^\s/]+/.test(u)){ el.textContent='Enter the full https:// URL of your Worker.'; return; }
+  if(!t){ el.textContent='Enter the app token.'; return; }
+  localStorage.setItem('mj_backend_url',u);
+  localStorage.setItem('mj_backend_token',t);
+  document.getElementById('backendTokenInput').value='';
+  el.textContent='Saved on this device. Tap Test to check it.';
+};
+document.getElementById('clearBackendBtn').onclick=()=>{
+  localStorage.removeItem('mj_backend_url'); localStorage.removeItem('mj_backend_token');
+  document.getElementById('backendUrlInput').value='';
+  document.getElementById('backendStatus').textContent='Backend cleared. Jarvis will use any keys saved above directly.';
+};
+document.getElementById('testBackendBtn').onclick=async ()=>{
+  const el=document.getElementById('backendStatus'), be=backendCfg();
+  if(!be){ el.textContent='Save the URL and token first.'; return; }
+  el.textContent='Testing…';
+  try{
+    const h=await fetch(be.url+'/health');
+    if(!h.ok){ el.textContent='Reached a server, but /health returned '+h.status+'. Check the URL is your Worker.'; return; }
+    const r=await fetch(be.url+'/status',{headers:{'Authorization':'Bearer '+be.token}});
+    if(r.status===401){ el.textContent='Backend is up, but the token does not match its APP_TOKEN.'; return; }
+    if(r.status===403){ el.textContent='Backend refused this site. Set the Worker\'s ALLOWED_ORIGIN to exactly '+location.origin; return; }
+    if(!r.ok){ el.textContent='Backend returned '+r.status+'.'; return; }
+    const st=await r.json();
+    el.textContent='Connected. Claude key on backend: '+(st.claude?'yes':'NOT SET')+'. MindsHub key on backend: '+(st.jev?'yes':'not set')+'.';
+  }catch(e){
+    el.textContent='Could not reach the backend — check the URL, your connection, and that ALLOWED_ORIGIN is set to '+location.origin+'.';
+  }
+};
 document.getElementById('saveJevKeyBtn').onclick=()=>{
   const v=document.getElementById('jevKeyInput').value.trim();
   if(!v){ alert('Enter a MindsHub API key first.'); return; }
@@ -923,8 +1027,8 @@ document.getElementById('clearJevKeyBtn').onclick=()=>{
 };
 document.getElementById('testJevBtn').onclick=async ()=>{
   const el=document.getElementById('jevKeyStatus');
-  const key=localStorage.getItem('mj_jev_key');
-  if(!key){ el.textContent='Save a key first.'; return; }
+  const key=localStorage.getItem('mj_jev_key')||'';
+  if(!key && !backendCfg()){ el.textContent='Save a MindsHub key or set up the backend first.'; return; }
   el.textContent='Testing…';
   try{
     const r=await askJev(key,{note:'Buy milk on the way home'},NOTE_CATEGORY_QUESTION);
@@ -1033,11 +1137,7 @@ async function askClaude(prompt, apiKey){
   const messages=[...AI_HISTORY.slice(-8),{role:'user',content:prompt}];
   let finalText='';
   for(let i=0;i<4;i++){
-    const res=await fetch('https://api.anthropic.com/v1/messages',{
-      method:'POST',
-      headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({model:'claude-haiku-4-5-20251001',max_tokens:400,system,tools:AI_TOOLS,messages})
-    });
+    const res=await callClaudeAPI(apiKey,{model:'claude-haiku-4-5-20251001',max_tokens:400,system,tools:AI_TOOLS,messages});
     if(!res.ok){
       const body=await res.text().catch(()=> '');
       throw new Error('('+res.status+') '+body.slice(0,120));
@@ -1058,6 +1158,124 @@ async function askClaude(prompt, apiKey){
 // A command whose real answer requires an async Google API call: speak an
 // immediate acknowledgment (the routeCommand return value), then once the
 // promise resolves, log + speak the actual result as a follow-up.
+/* ---------- Statistics engine: pure rule-based, no API needed ---------- */
+const Stats={
+  mean(a){ return a.reduce((x,y)=>x+y,0)/a.length; },
+  median(a){ const s=[...a].sort((x,y)=>x-y),n=s.length,m=Math.floor(n/2); return n%2?s[m]:(s[m-1]+s[m])/2; },
+  mode(a){ const c={}; a.forEach(v=>c[v]=(c[v]||0)+1); let best=null,bc=0; for(const k in c) if(c[k]>bc){bc=c[k];best=k;} return bc>1?Number(best):null; },
+  variance(a){ const m=Stats.mean(a); return a.reduce((s,v)=>s+(v-m)**2,0)/a.length; },
+  stddev(a){ return Math.sqrt(Stats.variance(a)); },
+  quartile(a,q){ const s=[...a].sort((x,y)=>x-y); const pos=(s.length-1)*q, base=Math.floor(pos), rest=pos-base; return s[base+1]!==undefined ? s[base]+rest*(s[base+1]-s[base]) : s[base]; },
+  pearson(a,b){
+    const n=Math.min(a.length,b.length); if(n<2) return null;
+    const ma=Stats.mean(a.slice(0,n)), mb=Stats.mean(b.slice(0,n));
+    let num=0,da=0,db=0;
+    for(let i=0;i<n;i++){ num+=(a[i]-ma)*(b[i]-mb); da+=(a[i]-ma)**2; db+=(b[i]-mb)**2; }
+    const den=Math.sqrt(da*db); return den===0?null:num/den;
+  }
+};
+function parseCSV(text){
+  const lines=text.trim().split(/\r?\n/).filter(l=>l.trim().length);
+  if(!lines.length) return {headers:[],rows:[]};
+  const splitLine=l=>l.split(',').map(c=>c.trim().replace(/^"|"$/g,''));
+  const first=splitLine(lines[0]);
+  const looksNumeric=arr=>arr.every(c=>c!==''&&!isNaN(Number(c)));
+  const hasHeader = !looksNumeric(first) && lines.length>1;
+  const headers = hasHeader ? first : first.map((_,i)=>'Column '+(i+1));
+  const dataLines = hasHeader ? lines.slice(1) : lines;
+  const rows = dataLines.map(splitLine);
+  return {headers,rows};
+}
+function describeCorrelation(r){
+  if(r===null) return 'not enough data to compare';
+  const a=Math.abs(r);
+  const strength = a>=0.7?'a strong':a>=0.4?'a moderate':a>=0.2?'a weak':'almost no';
+  const dir = r>=0?'positive':'negative';
+  return `${strength} ${dir} relationship (r = ${r.toFixed(2)})`;
+}
+function analyzeColumn(name,values){
+  const nums=values.map(Number).filter(v=>!isNaN(v));
+  if(nums.length<values.length*0.6 || nums.length<2){
+    // treat as categorical
+    const counts={}; values.forEach(v=>counts[v]=(counts[v]||0)+1);
+    const sorted=Object.entries(counts).sort((a,b)=>b[1]-a[1]);
+    const top=sorted.slice(0,3).map(([k,c])=>`"${k}" (${c}, ${(100*c/values.length).toFixed(0)}%)`).join(', ');
+    return `"${name}" looks categorical, with ${sorted.length} distinct value${sorted.length===1?'':'s'} across ${values.length} entries. Most common: ${top}.`;
+  }
+  const mean=Stats.mean(nums), med=Stats.median(nums), sd=Stats.stddev(nums), mn=Math.min(...nums), mx=Math.max(...nums);
+  const spread = sd/Math.abs(mean||1) > 0.5 ? 'widely spread' : sd/Math.abs(mean||1) > 0.2 ? 'moderately spread' : 'tightly clustered';
+  const skew = mean-med;
+  const shape = Math.abs(skew) < sd*0.1 ? 'roughly symmetric' : skew>0 ? 'pulled upward by some higher values' : 'pulled downward by some lower values';
+  return `"${name}": ${nums.length} numeric values, averaging ${mean.toFixed(2)} (median ${med.toFixed(2)}), ranging from ${mn} to ${mx}. The spread is ${spread} (standard deviation ${sd.toFixed(2)}), and the distribution is ${shape}.`;
+}
+function analyzeDataset(raw){
+  const text=raw.trim();
+  if(!text) return "Paste some numbers or a CSV first.";
+  // plain number list (no commas-as-columns ambiguity beyond one column)?
+  const {headers,rows}=parseCSV(text);
+  if(!rows.length) return "I couldn't find any data to analyze.";
+  const cols=headers.map((h,i)=>({name:h, values:rows.map(r=>r[i]).filter(v=>v!==undefined && v!=='')}));
+  let out = `Reviewed ${rows.length} row${rows.length===1?'':'s'} across ${cols.length} column${cols.length===1?'':'s'}.\n\n`;
+  out += cols.map(c=>analyzeColumn(c.name,c.values)).join('\n');
+  const numericCols=cols.filter(c=>{ const n=c.values.map(Number).filter(v=>!isNaN(v)); return n.length>=c.values.length*0.6 && n.length>1; });
+  if(numericCols.length>1){
+    out += '\n\nRelationships between numeric columns:\n';
+    for(let i=0;i<numericCols.length;i++){
+      for(let j=i+1;j<numericCols.length;j++){
+        const a=numericCols[i].values.map(Number), b=numericCols[j].values.map(Number);
+        const r=Stats.pearson(a,b);
+        out += `- "${numericCols[i].name}" vs "${numericCols[j].name}": ${describeCorrelation(r)}.\n`;
+      }
+    }
+  }
+  return out.trim();
+}
+/* ---------- Jarvis's own data, explained in words ---------- */
+function analyzeJarvisData(){
+  const parts=[];
+  // Tasks
+  const tasks=STATE.tasks;
+  if(tasks.length){
+    const done=tasks.filter(t=>t.done);
+    const pct=(100*done.length/tasks.length).toFixed(0);
+    const byP={low:0,med:0,high:0}; tasks.forEach(t=>byP[t.priority]=(byP[t.priority]||0)+1);
+    const topP=Object.entries(byP).sort((a,b)=>b[1]-a[1])[0];
+    let line=`Tasks: ${tasks.length} total, ${done.length} completed (${pct}%). Most common priority is ${topP[0]} (${topP[1]} task${topP[1]===1?'':'s'}).`;
+    const turnarounds=done.filter(t=>t.completedAt&&t.created).map(t=>(t.completedAt-t.created)/3600000);
+    if(turnarounds.length>=2){
+      const avgH=Stats.mean(turnarounds);
+      line += ` Completed tasks took ${avgH<1?Math.round(avgH*60)+' minutes':avgH.toFixed(1)+' hours'} on average from creation to done.`;
+    }
+    const learned=tasks.filter(t=>t.source==='learned').length, jevd=tasks.filter(t=>t.source==='jev').length;
+    if(learned||jevd) line += ` Auto-scored: ${jevd} by Jev, ${learned} by on-device learning.`;
+    parts.push(line);
+  } else parts.push('Tasks: none yet.');
+  // Notes
+  const notes=STATE.notes;
+  if(notes.length){
+    const byCat={}; notes.forEach(n=>{ if(n.category) byCat[n.category]=(byCat[n.category]||0)+1; });
+    const catEntries=Object.entries(byCat).sort((a,b)=>b[1]-a[1]);
+    let line=`Notes: ${notes.length} saved.`;
+    if(catEntries.length) line += ` By category: ${catEntries.map(([k,v])=>`${k} (${v})`).join(', ')}.`;
+    const freq={};
+    notes.forEach(n=>tokenize(n.text).forEach(w=>freq[w]=(freq[w]||0)+1));
+    const topWords=Object.entries(freq).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([w])=>w);
+    if(topWords.length) line += ` Recurring topics: ${topWords.join(', ')}.`;
+    parts.push(line);
+  } else parts.push('Notes: none yet.');
+  // Contacts
+  parts.push(`Contacts: ${STATE.contacts.length} saved${STATE.contacts.length?` (${STATE.contacts.filter(c=>c.phone).length} with a phone number, ${STATE.contacts.filter(c=>c.email).length} with an email).`:'.'}`);
+  // Conversations / commands
+  const convos=STATE.conversations;
+  if(convos.length){
+    const cfreq={};
+    convos.forEach(c=>{ const first=(c.command||'').toLowerCase().split(/\s+/).slice(1,3).join(' '); if(first) cfreq[first]=(cfreq[first]||0)+1; });
+    const top=Object.entries(cfreq).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([k,v])=>`"${k}" (${v}×)`);
+    parts.push(`Voice/typed commands: ${convos.length} logged. Most frequent: ${top.join(', ')||'no clear pattern yet'}.`);
+  } else parts.push('Voice/typed commands: none logged yet.');
+  return parts.join('\n\n');
+}
+
 function deferredReply(cmd, promiseFn){
   promiseFn().then(text=>{
     STATE.conversations.push({id:uid(),command:cmd,response:text,created:Date.now()});
@@ -1181,6 +1399,13 @@ function routeCommand(cmd){
     const dest=m[1];
     setTimeout(()=>{ window.location.href='https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(dest); }, 400);
     return `Opening directions to ${dest}.`;
+  }
+  // ANALYZE MY DATA (Jarvis insights, spoken as a short summary)
+  if(/^(analyze|review)\s+my\s+(data|stats|tasks and notes)/.test(cmd)){
+    const full=analyzeJarvisData();
+    document.getElementById('jarvisInsightsOutput').textContent=full;
+    const firstLine=full.split('\n\n')[0];
+    return firstLine+' Full details are on the Analytics tab.';
   }
   // TIME
   if(/what.*time/.test(cmd)) return `It is ${new Date().toLocaleTimeString()}.`;
@@ -1479,6 +1704,10 @@ document.getElementById('clearAiKeyBtn').onclick=()=>{
 /* ---------- Boot ---------- */
 (function boot(){
   document.getElementById('clientIdInput').value=CLIENT_ID;
+  if(backendCfg()){
+    document.getElementById('backendUrlInput').value=backendCfg().url;
+    document.getElementById('backendStatus').textContent='A backend is configured on this device.';
+  }
   if(localStorage.getItem('mj_jev_key')){
     document.getElementById('jevKeyStatus').textContent='A MindsHub key is currently saved on this device.';
   }
